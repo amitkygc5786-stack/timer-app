@@ -1,0 +1,372 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/assets/fonts/JetBrainsMono.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/assets/fonts/PlusJakartaSans.woff2") format("woff2");
+}
+
+@layer base {
+  :root {
+    --radius: 0.75rem;
+    --background: 0.09 0.005 240;
+    --foreground: 0.97 0.004 240;
+    --card: 0.18 0.007 230;
+    --card-foreground: 0.97 0.004 240;
+    --popover: 0.22 0.007 230;
+    --popover-foreground: 0.97 0.004 240;
+    --primary: 0.9 0.27 152;
+    --primary-foreground: 0.08 0.006 240;
+    --secondary: 0.26 0.008 230;
+    --secondary-foreground: 0.97 0.004 240;
+    --muted: 0.24 0.008 230;
+    --muted-foreground: 0.6 0.012 230;
+    --accent: 0.9 0.27 152;
+    --accent-foreground: 0.08 0.006 240;
+    --destructive: 0.65 0.22 25;
+    --destructive-foreground: 0.97 0.004 240;
+    --border: 0.28 0.008 230;
+    --input: 0.28 0.008 230;
+    --ring: 0.9 0.27 152;
+    --chart-1: 0.9 0.27 152;
+    --chart-2: 0.65 0.15 220;
+    --chart-3: 0.75 0.18 70;
+    --chart-4: 0.65 0.22 25;
+    --chart-5: 0.7 0.16 300;
+    --sidebar: 0.15 0.007 230;
+    --sidebar-foreground: 0.97 0.004 240;
+    --sidebar-primary: 0.9 0.27 152;
+    --sidebar-primary-foreground: 0.08 0.006 240;
+    --sidebar-accent: 0.26 0.008 230;
+    --sidebar-accent-foreground: 0.97 0.004 240;
+    --sidebar-border: 0.28 0.008 230;
+    --sidebar-ring: 0.9 0.27 152;
+
+    /* Custom app tokens */
+    --neon-green: oklch(0.93 0.3 155);
+    --neon-green-glow: oklch(0.96 0.28 155);
+    --neon-red: oklch(0.63 0.24 32);
+    --neon-yellow: oklch(0.88 0.18 80);
+    --neon-orange: oklch(0.72 0.22 55);
+    --neon-cyan: oklch(0.88 0.18 200);
+    --neon-purple: oklch(0.65 0.28 300);
+    --surface: oklch(0.15 0.007 235);
+    --surface-2: oklch(0.2 0.007 230);
+    --surface-3: oklch(0.25 0.008 230);
+  }
+
+  .dark {
+    --background: 0.09 0.005 240;
+    --foreground: 0.97 0.004 240;
+    --card: 0.18 0.007 230;
+    --card-foreground: 0.97 0.004 240;
+    --popover: 0.22 0.007 230;
+    --popover-foreground: 0.97 0.004 240;
+    --primary: 0.9 0.27 152;
+    --primary-foreground: 0.08 0.006 240;
+    --secondary: 0.26 0.008 230;
+    --secondary-foreground: 0.97 0.004 240;
+    --muted: 0.24 0.008 230;
+    --muted-foreground: 0.6 0.012 230;
+    --accent: 0.9 0.27 152;
+    --accent-foreground: 0.08 0.006 240;
+    --destructive: 0.65 0.22 25;
+    --destructive-foreground: 0.97 0.004 240;
+    --border: 0.28 0.008 230;
+    --input: 0.28 0.008 230;
+    --ring: 0.9 0.27 152;
+    --chart-1: 0.9 0.27 152;
+    --chart-2: 0.65 0.15 220;
+    --chart-3: 0.75 0.18 70;
+    --chart-4: 0.65 0.22 25;
+    --chart-5: 0.7 0.16 300;
+    --sidebar: 0.15 0.007 230;
+    --sidebar-foreground: 0.97 0.004 240;
+    --sidebar-primary: 0.9 0.27 152;
+    --sidebar-primary-foreground: 0.08 0.006 240;
+    --sidebar-accent: 0.26 0.008 230;
+    --sidebar-accent-foreground: 0.97 0.004 240;
+    --sidebar-border: 0.28 0.008 230;
+    --sidebar-ring: 0.9 0.27 152;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+    background: radial-gradient(
+      ellipse at 50% 0%,
+      oklch(0.16 0.018 200 / 0.7) 0%,
+      oklch(0.09 0.005 240) 60%
+    );
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  /* Glassmorphism primary button */
+  .glass-btn {
+    background: oklch(0.93 0.3 155 / 0.12);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid oklch(0.93 0.3 155 / 0.3);
+    color: oklch(0.93 0.3 155);
+    box-shadow: 0 0 16px oklch(0.93 0.3 155 / 0.2), inset 0 1px 0
+      oklch(1 0 0 / 0.08);
+  }
+  .glass-btn:hover:not(:disabled) {
+    background: oklch(0.93 0.3 155 / 0.22);
+    border-color: oklch(0.93 0.3 155 / 0.55);
+    box-shadow: 0 0 28px oklch(0.93 0.3 155 / 0.4), inset 0 1px 0
+      oklch(1 0 0 / 0.12);
+  }
+
+  /* Secondary ghost glass (for Reset, Lap buttons) */
+  .glass-btn-secondary {
+    background: oklch(0.97 0.004 240 / 0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid oklch(0.97 0.004 240 / 0.15);
+    color: oklch(0.75 0.01 230);
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.06);
+  }
+  .glass-btn-secondary:hover:not(:disabled) {
+    background: oklch(0.97 0.004 240 / 0.12);
+    border-color: oklch(0.97 0.004 240 / 0.28);
+    color: oklch(0.9 0.004 240);
+  }
+
+  /* Electric Orange — TABATA */
+  .glass-btn-orange {
+    background: oklch(0.72 0.22 55 / 0.15);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid oklch(0.72 0.22 55 / 0.5);
+    color: oklch(0.85 0.2 55);
+    box-shadow: 0 0 20px oklch(0.72 0.22 55 / 0.35), inset 0 1px 0
+      oklch(1 0 0 / 0.08);
+  }
+  .glass-btn-orange:hover:not(:disabled) {
+    background: oklch(0.72 0.22 55 / 0.25);
+    border-color: oklch(0.72 0.22 55 / 0.75);
+    box-shadow: 0 0 32px oklch(0.72 0.22 55 / 0.55);
+  }
+
+  /* Cyan — HIIT */
+  .glass-btn-cyan {
+    background: oklch(0.88 0.18 200 / 0.12);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid oklch(0.88 0.18 200 / 0.5);
+    color: oklch(0.88 0.18 200);
+    box-shadow: 0 0 20px oklch(0.88 0.18 200 / 0.3), inset 0 1px 0
+      oklch(1 0 0 / 0.08);
+  }
+  .glass-btn-cyan:hover:not(:disabled) {
+    background: oklch(0.88 0.18 200 / 0.22);
+    border-color: oklch(0.88 0.18 200 / 0.75);
+    box-shadow: 0 0 32px oklch(0.88 0.18 200 / 0.5);
+  }
+
+  /* Preset pulse animation */
+  @keyframes preset-pulse-kf {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(1.02);
+      filter: brightness(1.15);
+    }
+  }
+  .preset-pulse {
+    animation: preset-pulse-kf 2s ease-in-out infinite;
+  }
+  .preset-pulse:hover {
+    animation: none;
+  }
+
+  /* Neon Purple — Save */
+  .glass-btn-purple {
+    background: oklch(0.65 0.28 300 / 0.15);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid oklch(0.65 0.28 300 / 0.5);
+    color: oklch(0.78 0.22 300);
+    box-shadow: 0 0 20px oklch(0.65 0.28 300 / 0.35), inset 0 1px 0
+      oklch(1 0 0 / 0.08);
+  }
+  .glass-btn-purple:hover:not(:disabled) {
+    background: oklch(0.65 0.28 300 / 0.25);
+    border-color: oklch(0.65 0.28 300 / 0.75);
+    box-shadow: 0 0 32px oklch(0.65 0.28 300 / 0.5);
+  }
+}
+
+@layer utilities {
+  .neon-text {
+    color: var(--neon-green);
+    text-shadow: 0 0 10px oklch(0.93 0.3 155 / 0.8), 0 0 24px
+      oklch(0.93 0.3 155 / 0.5);
+  }
+
+  .neon-border {
+    border-color: oklch(0.93 0.3 155 / 0.6);
+    box-shadow: 0 0 16px oklch(0.93 0.3 155 / 0.35), inset 0 0 16px
+      oklch(0.93 0.3 155 / 0.06);
+  }
+
+  /* Gym-mode primary CTA — glassmorphism neon */
+  .neon-btn {
+    background: oklch(0.93 0.3 155 / 0.18);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid oklch(0.93 0.3 155 / 0.5);
+    color: oklch(0.95 0.18 152);
+    box-shadow: 0 0 20px oklch(0.93 0.3 155 / 0.5), 0 0 40px
+      oklch(0.93 0.3 155 / 0.25), inset 0 1px 0 oklch(1 0 0 / 0.1);
+    touch-action: manipulation;
+  }
+
+  .neon-btn:hover:not(:disabled) {
+    background: oklch(0.93 0.3 155 / 0.28);
+    border-color: oklch(0.93 0.3 155 / 0.75);
+    box-shadow: 0 0 30px oklch(0.93 0.3 155 / 0.7), 0 0 60px
+      oklch(0.93 0.3 155 / 0.35), inset 0 1px 0 oklch(1 0 0 / 0.15);
+  }
+
+  /* Super-large mono timer digits — readable from 2 metres */
+  .timer-display-xl {
+    font-size: clamp(4rem, 18vw, 7rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+
+  .alarm-flash {
+    animation: alarmFlash 0.5s ease-in-out infinite;
+  }
+
+  @keyframes alarmFlash {
+    0%,
+    100% {
+      box-shadow: 0 0 20px oklch(0.65 0.22 25 / 0.4), 0 0 60px
+        oklch(0.65 0.22 25 / 0.15);
+      border-color: oklch(0.63 0.24 32);
+    }
+    50% {
+      box-shadow: 0 0 50px oklch(0.65 0.22 25 / 0.85), 0 0 100px
+        oklch(0.65 0.22 25 / 0.35);
+      border-color: oklch(0.75 0.22 25);
+    }
+  }
+
+  /* Card dark-red flash at 3-2-1 */
+  .card-countdown-flash {
+    animation: cardCountdownFlash 0.2s ease-out forwards;
+  }
+
+  @keyframes cardCountdownFlash {
+    0% {
+      background: oklch(0.28 0.12 20 / 0.7);
+    }
+    100% {
+      background: transparent;
+    }
+  }
+
+  /* Ring scale pulse at 3-2-1 */
+  .ring-countdown-pulse {
+    animation: ringCountdownPulse 0.2s ease-out forwards;
+  }
+
+  @keyframes ringCountdownPulse {
+    0% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(1.05);
+    }
+    100% {
+      transform: scale(1);
+    }
+  }
+
+  /* Pre-alert: subtle yellow pulsing glow on the ring wrapper */
+  .pre-alert-pulse {
+    border-radius: 50%;
+    animation: preAlertPulse 0.9s ease-in-out infinite;
+  }
+
+  @keyframes preAlertPulse {
+    0%,
+    100% {
+      filter: drop-shadow(0 0 6px oklch(0.88 0.18 80 / 0.4));
+    }
+    50% {
+      filter: drop-shadow(0 0 22px oklch(0.88 0.18 80 / 0.85));
+    }
+  }
+
+  /* Rest phase: slow red pulse on the ring wrapper */
+  .rest-phase-pulse {
+    border-radius: 50%;
+    animation: restPulse 2s ease-in-out infinite;
+  }
+
+  @keyframes restPulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+
+  /* Pre-alert countdown text colour (yellow) */
+  .pre-alert-text {
+    color: var(--neon-yellow);
+    text-shadow: 0 0 8px oklch(0.88 0.18 80 / 0.7), 0 0 24px
+      oklch(0.88 0.18 80 / 0.4);
+  }
+
+  /* Time display glow */
+  .time-display-glow {
+    text-shadow: 0 0 20px oklch(0.93 0.3 155 / 0.5), 0 0 40px
+      oklch(0.93 0.3 155 / 0.2);
+  }
+
+  .font-mono-display {
+    font-family: "JetBrains Mono", "Courier New", monospace;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .timer-display-xl {
+    font-size: clamp(3rem, 14vh, 5.5rem);
+  }
+  .timer-ring-landscape {
+    width: 180px !important;
+    height: 180px !important;
+  }
+}

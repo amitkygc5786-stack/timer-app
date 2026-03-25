@@ -1,0 +1,2318 @@
+import {
+  AlarmClock,
+  Bell,
+  BellOff,
+  CheckCircle2,
+  Clock,
+  Dumbbell,
+  Flag,
+  Layers,
+  Pause,
+  Play,
+  RotateCcw,
+  Timer,
+  Zap,
+} from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { CircularProgress } from "./CircularProgress";
+
+type Mode = "countdown" | "stopwatch";
+type Status = "idle" | "running" | "paused" | "alarming";
+type NotifPermission = "default" | "granted" | "denied" | "unsupported";
+type WorkoutPhase = "work" | "rest" | "complete";
+
+interface Lap {
+  index: number;
+  time: number;
+  split: number;
+}
+
+interface SetLog {
+  set: number;
+  workMs: number;
+  restMs: number | null;
+}
+
+interface WorkoutConfig {
+  workMs: number;
+  restMs: number;
+  totalSets: number;
+}
+
+interface WorkoutState {
+  currentSet: number;
+  phase: WorkoutPhase;
+  log: SetLog[];
+}
+
+type PresetType = "tabata" | "hiit" | "custom";
+
+interface CustomRoutine {
+  id: string;
+  name: string;
+  workMs: number;
+  restMs: number;
+  sets: number;
+  color: string;
+}
+
+function loadCustomRoutines(): CustomRoutine[] {
+  try {
+    return JSON.parse(localStorage.getItem("cf_custom_routines") || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveCustomRoutines(r: CustomRoutine[]) {
+  localStorage.setItem("cf_custom_routines", JSON.stringify(r));
+}
+
+// ---------- Audio helpers ----------
+
+function playTickSound() {
+  try {
+    const ctx = new (
+      window.AudioContext || (window as any).webkitAudioContext
+    )();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(1400, ctx.currentTime);
+    gain.gain.setValueAtTime(0.7, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.08);
+  } catch {
+    // Audio not supported
+  }
+}
+
+/** Louder, more distinct beep for 3-2-1 countdown */
+function playLoudBeep() {
+  try {
+    const ctx = new (
+      window.AudioContext || (window as any).webkitAudioContext
+    )();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    gain.gain.setValueAtTime(1.0, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.2);
+  } catch {
+    // Audio not supported
+  }
+}
+
+function playAlarmBeeps() {
+  try {
+    const ctx = new (
+      window.AudioContext || (window as any).webkitAudioContext
+    )();
+    const beepAt = (startTime: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "square";
+      osc.frequency.setValueAtTime(880, startTime);
+
+      gain.gain.setValueAtTime(1.0, startTime);
+      gain.gain.setValueAtTime(1.0, startTime + 0.35);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.4);
+      osc.start(startTime);
+      osc.stop(startTime + 0.4);
+      // Second oscillator one octave up for piercing dual-tone
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.type = "sine";
+      osc2.frequency.setValueAtTime(880 * 2, startTime); // 1760Hz
+      gain2.gain.setValueAtTime(0.4, startTime);
+      gain2.gain.setValueAtTime(0.4, startTime + 0.35);
+      gain2.gain.exponentialRampToValueAtTime(0.001, startTime + 0.4);
+      osc2.start(startTime);
+      osc2.stop(startTime + 0.4);
+    };
+    const now = ctx.currentTime;
+    beepAt(now);
+    beepAt(now + 0.55);
+    beepAt(now + 1.1);
+  } catch {
+    // Audio not supported
+  }
+}
+
+function triggerVibration() {
+  if ("vibrate" in navigator) {
+    navigator.vibrate([500, 200, 500, 200, 500]);
+  }
+}
+
+// ---------- Voice helper ----------
+function speak(text: string) {
+  if (!("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.rate = 0.88;
+  utter.pitch = 1.1;
+  utter.volume = 1;
+  const voices = window.speechSynthesis.getVoices();
+  const eng = voices.find((v) => v.lang.startsWith("en"));
+  if (eng) utter.voice = eng;
+  window.speechSynthesis.speak(utter);
+}
+
+// ---------- Torch blink ----------
+async function blinkTorch() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" },
+    });
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    const blink = async (times: number) => {
+      for (let i = 0; i < times; i++) {
+        await track.applyConstraints({ advanced: [{ torch: true } as any] });
+        await new Promise((r) => setTimeout(r, 200));
+        await track.applyConstraints({ advanced: [{ torch: false } as any] });
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      track.stop();
+    };
+    blink(4);
+  } catch {
+    /* torch not supported */
+  }
+}
+
+// ---------- Countdown voice sequence ----------
+function speakCountdown(finalWord: string) {
+  if (!("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const sayAt = (text: string, delayMs: number) => {
+    setTimeout(() => speak(text), delayMs);
+  };
+  sayAt("3", 0);
+  sayAt("2", 900);
+  sayAt("1", 1800);
+  sayAt(finalWord, 2700);
+}
+
+// ---------- Notification helpers ----------
+
+async function requestNotificationPermission(): Promise<NotifPermission> {
+  if (!("Notification" in window)) return "unsupported";
+  if (Notification.permission === "granted") return "granted";
+  if (Notification.permission === "denied") return "denied";
+  const result = await Notification.requestPermission();
+  return result as NotifPermission;
+}
+
+function playPhaseTransitionSound() {
+  try {
+    const ctx = new (
+      window.AudioContext || (window as any).webkitAudioContext
+    )();
+    [440, 660].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + i * 0.12);
+      gain.gain.setValueAtTime(0.9, ctx.currentTime + i * 0.12);
+      gain.gain.exponentialRampToValueAtTime(
+        0.001,
+        ctx.currentTime + i * 0.12 + 0.25,
+      );
+      osc.start(ctx.currentTime + i * 0.12);
+      osc.stop(ctx.currentTime + i * 0.12 + 0.25);
+    });
+  } catch {}
+}
+
+function sendNotification(title: string, body: string) {
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification(title, { body, icon: "/favicon.ico" });
+  }
+}
+
+// ---------- Format helpers ----------
+
+function formatCountdown(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function formatStopwatch(ms: number): string {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const cs = Math.floor((ms % 1000) / 10);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
+
+function formatMmSs(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function WorkoutSummaryChart({ log }: { log: SetLog[] }) {
+  const totalWork = log.reduce((s, e) => s + e.workMs, 0);
+  const totalRest = log.reduce((s, e) => s + (e.restMs ?? 0), 0);
+  const maxBarMs = Math.max(
+    ...log.map((e) => Math.max(e.workMs, e.restMs ?? 0)),
+    1,
+  );
+  const BAR_HEIGHT = 18;
+  const GAP = 8;
+  const LABEL_W = 36;
+  const BAR_MAX_W = 180;
+
+  return (
+    <div className="mt-4 mb-2">
+      {/* Total summary pills */}
+      <div className="flex gap-3 mb-4">
+        <div
+          className="flex-1 rounded-xl px-3 py-2 text-center"
+          style={{
+            background: "oklch(0.93 0.3 155 / 0.1)",
+            border: "1px solid oklch(0.93 0.3 155 / 0.25)",
+          }}
+        >
+          <div className="text-xs text-muted-foreground uppercase tracking-widest mb-0.5">
+            Work
+          </div>
+          <div
+            className="font-mono-display font-bold text-sm"
+            style={{ color: "oklch(0.93 0.3 155)" }}
+          >
+            {formatMmSs(totalWork)}
+          </div>
+        </div>
+        <div
+          className="flex-1 rounded-xl px-3 py-2 text-center"
+          style={{
+            background: "oklch(0.78 0.2 55 / 0.1)",
+            border: "1px solid oklch(0.78 0.2 55 / 0.25)",
+          }}
+        >
+          <div className="text-xs text-muted-foreground uppercase tracking-widest mb-0.5">
+            Rest
+          </div>
+          <div
+            className="font-mono-display font-bold text-sm"
+            style={{ color: "oklch(0.78 0.2 55)" }}
+          >
+            {formatMmSs(totalRest)}
+          </div>
+        </div>
+        <div
+          className="flex-1 rounded-xl px-3 py-2 text-center"
+          style={{
+            background: "oklch(0.65 0.15 220 / 0.1)",
+            border: "1px solid oklch(0.65 0.15 220 / 0.25)",
+          }}
+        >
+          <div className="text-xs text-muted-foreground uppercase tracking-widest mb-0.5">
+            Sets
+          </div>
+          <div
+            className="font-mono-display font-bold text-sm"
+            style={{ color: "oklch(0.65 0.15 220)" }}
+          >
+            {log.length}
+          </div>
+        </div>
+      </div>
+
+      {/* Per-set horizontal bar chart */}
+      <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
+        <svg
+          width="100%"
+          viewBox={`0 0 ${LABEL_W + BAR_MAX_W + 4} ${log.length * (BAR_HEIGHT * 2 + GAP) + GAP}`}
+          style={{ display: "block" }}
+          aria-label="Workout sets chart"
+          role="img"
+        >
+          {log.map((entry, i) => {
+            const y = GAP + i * (BAR_HEIGHT * 2 + GAP);
+            const workW = (entry.workMs / maxBarMs) * BAR_MAX_W;
+            const restW = ((entry.restMs ?? 0) / maxBarMs) * BAR_MAX_W;
+            return (
+              <g key={entry.set}>
+                <text
+                  x={LABEL_W - 4}
+                  y={y + BAR_HEIGHT - 4}
+                  textAnchor="end"
+                  fontSize="9"
+                  fill="oklch(0.6 0.012 230)"
+                >
+                  S{entry.set}
+                </text>
+                {/* Work bar */}
+                <rect
+                  x={LABEL_W}
+                  y={y}
+                  width={Math.max(workW, 2)}
+                  height={BAR_HEIGHT - 2}
+                  rx="3"
+                  fill="oklch(0.93 0.3 155 / 0.75)"
+                />
+                {/* Rest bar */}
+                {entry.restMs !== null && (
+                  <rect
+                    x={LABEL_W}
+                    y={y + BAR_HEIGHT}
+                    width={Math.max(restW, 2)}
+                    height={BAR_HEIGHT - 4}
+                    rx="3"
+                    fill="oklch(0.78 0.2 55 / 0.65)"
+                  />
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Legend */}
+      <div className="flex gap-4 mt-2 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span
+            className="w-3 h-2 rounded-sm inline-block"
+            style={{ background: "oklch(0.93 0.3 155 / 0.75)" }}
+          />
+          Work
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="w-3 h-2 rounded-sm inline-block"
+            style={{ background: "oklch(0.78 0.2 55 / 0.65)" }}
+          />
+          Rest
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function TimerApp() {
+  const [mode, setMode] = useState<Mode>("countdown");
+  const [status, setStatus] = useState<Status>("idle");
+  const [notifPermission, setNotifPermission] =
+    useState<NotifPermission>("default");
+
+  const [cdHours, setCdHours] = useState(0);
+  const [cdMinutes, setCdMinutes] = useState(5);
+  const [cdSeconds, setCdSeconds] = useState(0);
+  const [cdRemaining, setCdRemaining] = useState(0);
+  const [cdTotal, setCdTotal] = useState(0);
+
+  const [isPreAlert, setIsPreAlert] = useState(false);
+  const [cardFlash, setCardFlash] = useState(false);
+  const [ringPulse, setRingPulse] = useState(false);
+
+  const [swElapsed, setSwElapsed] = useState(0);
+  const [laps, setLaps] = useState<Lap[]>([]);
+  const [lastLapTime, setLastLapTime] = useState(0);
+
+  // Workout mode state
+  const [workoutModeEnabled, setWorkoutModeEnabled] = useState(false);
+  const [workoutConfig, setWorkoutConfig] = useState<WorkoutConfig>({
+    workMs: 300000, // 5 min
+    restMs: 60000, // 1 min
+    totalSets: 3,
+  });
+  const [workoutState, setWorkoutState] = useState<WorkoutState | null>(null);
+  // Local inputs for workout panel
+  const [wrkWorkMin, setWrkWorkMin] = useState(5);
+  const [wrkWorkSec, setWrkWorkSec] = useState(0);
+  const [wrkRestMin, setWrkRestMin] = useState(1);
+  const [wrkRestSec, setWrkRestSec] = useState(0);
+  const [wrkSets, setWrkSets] = useState(3);
+  const [customRoutines, setCustomRoutines] =
+    useState<CustomRoutine[]>(loadCustomRoutines);
+  const [showAddCustom, setShowAddCustom] = useState(false);
+  const [newRoutineName, setNewRoutineName] = useState("My Routine");
+  const [newRoutineWork, setNewRoutineWork] = useState(45);
+  const [newRoutineRest, setNewRoutineRest] = useState(15);
+  const [newRoutineSets, setNewRoutineSets] = useState(10);
+  const [newRoutineColor, setNewRoutineColor] = useState("#00FF88");
+  const [activePreset, setActivePreset] = useState<PresetType | null>(null);
+  const [showSaveRoutinePrompt, setShowSaveRoutinePrompt] = useState(false);
+  const [saveRoutineName, setSaveRoutineName] = useState("");
+  const [isLandscape, setIsLandscape] = useState(
+    () =>
+      window.matchMedia("(orientation: landscape) and (max-height: 500px)")
+        .matches,
+  );
+  const activePresetRef = useRef<PresetType | null>(null);
+
+  // Landscape detection
+  useEffect(() => {
+    const mq = window.matchMedia(
+      "(orientation: landscape) and (max-height: 500px)",
+    );
+    const handler = (e: MediaQueryListEvent) => setIsLandscape(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  // Refs for workout state (so tick callbacks always have fresh values)
+  const workoutStateRef = useRef<WorkoutState | null>(null);
+  const workoutConfigRef = useRef<WorkoutConfig>(workoutConfig);
+  // Callback called when countdown hits zero (null = normal alarm)
+  const onZeroRef = useRef<(() => void) | null>(null);
+
+  // Keep refs in sync
+  useEffect(() => {
+    workoutStateRef.current = workoutState;
+  }, [workoutState]);
+  useEffect(() => {
+    workoutConfigRef.current = workoutConfig;
+  }, [workoutConfig]);
+  useEffect(() => {
+    activePresetRef.current = activePreset;
+  }, [activePreset]);
+
+  // Web Worker ref
+  const workerRef = useRef<Worker | null>(null);
+  const onTickRef = useRef<(elapsed: number) => void>(() => {});
+
+  const baseElapsedRef = useRef<number>(0);
+  const baseRemainingRef = useRef<number>(0);
+  const lastTickSecRef = useRef<number>(-1);
+  const sentPreAlertNotifRef = useRef(false);
+  const lastSpokenSecRef = useRef<number>(-1);
+
+  useEffect(() => {
+    const worker = new Worker("/timer.worker.js");
+    worker.onmessage = (e: MessageEvent) => {
+      if (e.data.type === "TICK") {
+        onTickRef.current(e.data.elapsed as number);
+      }
+    };
+    workerRef.current = worker;
+    return () => {
+      worker.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
+  const stopWorker = useCallback(() => {
+    workerRef.current?.postMessage({ type: "STOP" });
+  }, []);
+
+  useEffect(() => {
+    if (!("Notification" in window)) {
+      setNotifPermission("unsupported");
+      return;
+    }
+    setNotifPermission(Notification.permission as NotifPermission);
+    if (Notification.permission === "default") {
+      requestNotificationPermission().then(setNotifPermission);
+    }
+  }, []);
+
+  useEffect(() => () => stopWorker(), [stopWorker]);
+
+  const flashCard = useCallback(() => {
+    setCardFlash(true);
+    setTimeout(() => setCardFlash(false), 220);
+  }, []);
+
+  const pulseRing = useCallback(() => {
+    setRingPulse(true);
+    setTimeout(() => setRingPulse(false), 220);
+  }, []);
+
+  // Sets up the countdown tick callback WITHOUT sending START to worker
+  // Used both for normal start and internal workout advances
+  const setupCountdownOnTick = useCallback(
+    (remainingMs: number) => {
+      baseRemainingRef.current = remainingMs;
+      lastTickSecRef.current = -1;
+      lastSpokenSecRef.current = -1;
+      sentPreAlertNotifRef.current = false;
+
+      onTickRef.current = (elapsed: number) => {
+        const remaining = Math.max(0, baseRemainingRef.current - elapsed);
+        setCdRemaining(remaining);
+
+        const secRemaining = Math.ceil(remaining / 1000);
+
+        if (remaining > 0 && secRemaining <= 5) {
+          setIsPreAlert(true);
+          if (secRemaining !== lastTickSecRef.current) {
+            lastTickSecRef.current = secRemaining;
+            if (secRemaining <= 3) {
+              // Loud beep + vibration + visual flash for 3-2-1
+              playLoudBeep();
+              if ("vibrate" in navigator) navigator.vibrate(300);
+              flashCard();
+              pulseRing();
+              if (secRemaining !== lastSpokenSecRef.current) {
+                lastSpokenSecRef.current = secRemaining;
+                speak(String(secRemaining));
+              }
+            } else {
+              // Soft tick for 5, 4
+              playTickSound();
+            }
+            if (secRemaining === 5 && !sentPreAlertNotifRef.current) {
+              sentPreAlertNotifRef.current = true;
+              if (document.hidden) {
+                sendNotification("ChronoFlow", "5 seconds remaining!");
+              }
+            }
+          }
+        } else if (remaining > 5000) {
+          setIsPreAlert(false);
+        }
+
+        if (remaining <= 0) {
+          stopWorker();
+          setIsPreAlert(false);
+          lastTickSecRef.current = -1;
+          lastSpokenSecRef.current = -1;
+          sentPreAlertNotifRef.current = false;
+
+          if (onZeroRef.current) {
+            onZeroRef.current();
+          } else {
+            setStatus("alarming");
+            playAlarmBeeps();
+            triggerVibration();
+            blinkTorch();
+            if (document.hidden) {
+              sendNotification("ChronoFlow", "Countdown finished!");
+            }
+          }
+        }
+      };
+    },
+    [stopWorker, flashCard, pulseRing],
+  );
+
+  const startCountdownTick = useCallback(
+    (remainingMs: number) => {
+      setupCountdownOnTick(remainingMs);
+      workerRef.current?.postMessage({ type: "START", remaining: remainingMs });
+    },
+    [setupCountdownOnTick],
+  );
+
+  const startStopwatchTick = useCallback(() => {
+    onTickRef.current = (elapsed: number) => {
+      setSwElapsed(baseElapsedRef.current + elapsed);
+    };
+    workerRef.current?.postMessage({ type: "START", remaining: 0 });
+  }, []);
+
+  // ---- Workout advancement (reads from refs, safe to call in tick callbacks) ----
+  const advanceWorkout = useCallback(() => {
+    const ws = workoutStateRef.current;
+    const wc = workoutConfigRef.current;
+    if (!ws || ws.phase === "complete") {
+      onZeroRef.current = null;
+      return;
+    }
+
+    if (ws.phase === "work") {
+      // Work phase completed
+      const updatedLog: SetLog[] = [
+        ...ws.log,
+        { set: ws.currentSet, workMs: wc.workMs, restMs: null },
+      ];
+
+      if (ws.currentSet >= wc.totalSets) {
+        // All sets done
+        const finalWs: WorkoutState = {
+          currentSet: ws.currentSet,
+          phase: "complete",
+          log: updatedLog,
+        };
+        setWorkoutState(finalWs);
+        workoutStateRef.current = finalWs;
+        onZeroRef.current = null;
+        setStatus("idle");
+        setCdRemaining(0);
+        setCdTotal(0);
+        playAlarmBeeps();
+        triggerVibration();
+        blinkTorch();
+        sendNotification("ChronoFlow", "Workout Complete! 💪");
+        speak("Workout complete! Shabash!");
+        if (activePresetRef.current && activePresetRef.current !== "custom") {
+          setSaveRoutineName(
+            activePresetRef.current === "tabata" ? "My Tabata" : "My HIIT",
+          );
+          setShowSaveRoutinePrompt(true);
+        }
+      } else {
+        // Start rest
+        const nextWs: WorkoutState = {
+          currentSet: ws.currentSet,
+          phase: "rest",
+          log: updatedLog,
+        };
+        setWorkoutState(nextWs);
+        workoutStateRef.current = nextWs;
+        setCdRemaining(wc.restMs);
+        setCdTotal(wc.restMs);
+        setStatus("running");
+        baseRemainingRef.current = wc.restMs;
+        playPhaseTransitionSound();
+        speakCountdown("Rest!");
+        // Keep onZeroRef pointing to advanceWorkout for next phase
+        setupCountdownOnTick(wc.restMs);
+        workerRef.current?.postMessage({ type: "START", remaining: wc.restMs });
+      }
+    } else {
+      // Rest phase completed — update log entry with restMs
+      const updatedLog = ws.log.map((entry) =>
+        entry.set === ws.currentSet && entry.restMs === null
+          ? { ...entry, restMs: wc.restMs }
+          : entry,
+      );
+      const nextSet = ws.currentSet + 1;
+      const nextWs: WorkoutState = {
+        currentSet: nextSet,
+        phase: "work",
+        log: updatedLog,
+      };
+      setWorkoutState(nextWs);
+      workoutStateRef.current = nextWs;
+      setCdRemaining(wc.workMs);
+      setCdTotal(wc.workMs);
+      setStatus("running");
+      baseRemainingRef.current = wc.workMs;
+      playPhaseTransitionSound();
+      speakCountdown("Work!");
+      setupCountdownOnTick(wc.workMs);
+      workerRef.current?.postMessage({ type: "START", remaining: wc.workMs });
+    }
+  }, [setupCountdownOnTick]);
+
+  // Keep advanceWorkout up to date in onZeroRef when it changes
+  const advanceWorkoutRef = useRef(advanceWorkout);
+  useEffect(() => {
+    advanceWorkoutRef.current = advanceWorkout;
+  }, [advanceWorkout]);
+
+  const handleModeChange = useCallback(
+    (newMode: Mode) => {
+      stopWorker();
+      onZeroRef.current = null;
+      setMode(newMode);
+      setStatus("idle");
+      setCdRemaining(0);
+      setCdTotal(0);
+      setSwElapsed(0);
+      setLaps([]);
+      setLastLapTime(0);
+      setIsPreAlert(false);
+      setCardFlash(false);
+      setRingPulse(false);
+      setWorkoutState(null);
+      workoutStateRef.current = null;
+      lastTickSecRef.current = -1;
+      lastSpokenSecRef.current = -1;
+      sentPreAlertNotifRef.current = false;
+      baseElapsedRef.current = 0;
+      baseRemainingRef.current = 0;
+    },
+    [stopWorker],
+  );
+
+  const handleStart = useCallback(() => {
+    if (mode === "countdown") {
+      if (status === "idle") {
+        const totalMs = (cdHours * 3600 + cdMinutes * 60 + cdSeconds) * 1000;
+        if (totalMs <= 0) return;
+        setCdRemaining(totalMs);
+        setCdTotal(totalMs);
+        setIsPreAlert(false);
+        setStatus("running");
+        onZeroRef.current = null;
+        startCountdownTick(totalMs);
+      } else if (status === "paused") {
+        setStatus("running");
+        startCountdownTick(baseRemainingRef.current);
+      }
+    } else {
+      if (status === "idle" || status === "paused") {
+        setStatus("running");
+        startStopwatchTick();
+      }
+    }
+  }, [
+    mode,
+    status,
+    cdHours,
+    cdMinutes,
+    cdSeconds,
+    startCountdownTick,
+    startStopwatchTick,
+  ]);
+
+  const handlePause = useCallback(() => {
+    stopWorker();
+    if (mode === "countdown") {
+      setCdRemaining((prev) => {
+        baseRemainingRef.current = prev;
+        return prev;
+      });
+      setStatus("paused");
+    } else {
+      setSwElapsed((prev) => {
+        baseElapsedRef.current = prev;
+        return prev;
+      });
+      setStatus("paused");
+    }
+  }, [mode, stopWorker]);
+
+  const handleReset = useCallback(() => {
+    stopWorker();
+    onZeroRef.current = null;
+    setStatus("idle");
+    setIsPreAlert(false);
+    setCardFlash(false);
+    setRingPulse(false);
+    lastTickSecRef.current = -1;
+    lastSpokenSecRef.current = -1;
+    sentPreAlertNotifRef.current = false;
+    setActivePreset(null);
+    if (mode === "countdown") {
+      setCdRemaining(0);
+      setCdTotal(0);
+      baseRemainingRef.current = 0;
+      // Also reset workout if active
+      if (workoutState && workoutState.phase !== "complete") {
+        setWorkoutState(null);
+        workoutStateRef.current = null;
+      }
+    } else {
+      setSwElapsed(0);
+      baseElapsedRef.current = 0;
+      setLaps([]);
+      setLastLapTime(0);
+    }
+  }, [mode, stopWorker, workoutState]);
+
+  const handleLap = useCallback(() => {
+    if (mode === "stopwatch" && status === "running") {
+      setSwElapsed((currentElapsed) => {
+        setLaps((prev) => [
+          {
+            index: prev.length + 1,
+            time: currentElapsed,
+            split: currentElapsed - lastLapTime,
+          },
+          ...prev,
+        ]);
+        setLastLapTime(currentElapsed);
+        return currentElapsed;
+      });
+    }
+  }, [mode, status, lastLapTime]);
+
+  const handlePreset = useCallback(
+    (seconds: number) => {
+      const totalMs = seconds * 1000;
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      setCdHours(h);
+      setCdMinutes(m);
+      setCdSeconds(s);
+      setCdRemaining(totalMs);
+      setCdTotal(totalMs);
+      setIsPreAlert(false);
+      setStatus("running");
+      onZeroRef.current = null;
+      startCountdownTick(totalMs);
+    },
+    [startCountdownTick],
+  );
+
+  const handleDismissAlarm = useCallback(() => {
+    if ("vibrate" in navigator) navigator.vibrate(0);
+    setStatus("idle");
+    setCdRemaining(0);
+    setCdTotal(0);
+    setIsPreAlert(false);
+    setCardFlash(false);
+    setRingPulse(false);
+  }, []);
+
+  const handleStartWorkout = useCallback(() => {
+    const workMs = (wrkWorkMin * 60 + wrkWorkSec) * 1000;
+    const restMs = (wrkRestMin * 60 + wrkRestSec) * 1000;
+    if (workMs <= 0 || wrkSets <= 0) return;
+
+    const config: WorkoutConfig = { workMs, restMs, totalSets: wrkSets };
+    setWorkoutConfig(config);
+    workoutConfigRef.current = config;
+
+    const initialWs: WorkoutState = {
+      currentSet: 1,
+      phase: "work",
+      log: [],
+    };
+    setWorkoutState(initialWs);
+    workoutStateRef.current = initialWs;
+
+    setCdRemaining(workMs);
+    setCdTotal(workMs);
+    setStatus("running");
+    onZeroRef.current = () => advanceWorkoutRef.current();
+    startCountdownTick(workMs);
+  }, [
+    wrkWorkMin,
+    wrkWorkSec,
+    wrkRestMin,
+    wrkRestSec,
+    wrkSets,
+    startCountdownTick,
+  ]);
+
+  const startPreset = useCallback(
+    (config: WorkoutConfig, preset: PresetType) => {
+      setWorkoutConfig(config);
+      workoutConfigRef.current = config;
+      setActivePreset(preset);
+      setWorkoutModeEnabled(true);
+
+      const initialWs: WorkoutState = { currentSet: 1, phase: "work", log: [] };
+      setWorkoutState(initialWs);
+      workoutStateRef.current = initialWs;
+
+      setCdRemaining(config.workMs);
+      setCdTotal(config.workMs);
+      setStatus("running");
+      onZeroRef.current = () => advanceWorkoutRef.current();
+      startCountdownTick(config.workMs);
+      speakCountdown("Work!");
+    },
+    [startCountdownTick],
+  );
+
+  const handleSaveCustom = useCallback(() => {
+    const newR: CustomRoutine = {
+      id: Date.now().toString(),
+      name: newRoutineName || "My Routine",
+      workMs: newRoutineWork * 1000,
+      restMs: newRoutineRest * 1000,
+      sets: newRoutineSets,
+      color: newRoutineColor,
+    };
+    const updated = [...customRoutines, newR];
+    setCustomRoutines(updated);
+    saveCustomRoutines(updated);
+    setShowAddCustom(false);
+    setNewRoutineName("My Routine");
+  }, [
+    newRoutineName,
+    newRoutineWork,
+    newRoutineRest,
+    newRoutineSets,
+    newRoutineColor,
+    customRoutines,
+  ]);
+
+  const progress =
+    mode === "countdown" ? (cdTotal > 0 ? cdRemaining / cdTotal : 0) : 1;
+
+  const isAlarming = status === "alarming";
+  const isRunning = status === "running";
+  const isPaused = status === "paused";
+  const isIdle = status === "idle";
+
+  const displayTime =
+    mode === "countdown"
+      ? formatCountdown(
+          status === "idle"
+            ? (cdHours * 3600 + cdMinutes * 60 + cdSeconds) * 1000
+            : cdRemaining,
+        )
+      : formatStopwatch(swElapsed);
+
+  // Ring color during workout rest phase
+  const isRestPhase = workoutState?.phase === "rest";
+
+  return (
+    <div className="min-h-screen flex flex-col" data-ocid="app.page">
+      {/* Header */}
+      <header className="sticky top-0 z-50 border-b border-border/40 backdrop-blur-sm bg-background/80">
+        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div
+              className="w-8 h-8 rounded-full border-2 border-neon-green flex items-center justify-center"
+              style={{ boxShadow: "0 0 12px oklch(0.93 0.3 155 / 0.6)" }}
+            >
+              <Clock className="w-4 h-4 text-neon-green" />
+            </div>
+            <span className="font-bold text-lg tracking-tight text-foreground">
+              ChronoFlow
+            </span>
+          </div>
+
+          <nav className="hidden md:flex items-center gap-6 text-sm text-muted-foreground">
+            <a
+              href="#features"
+              className="hover:text-foreground transition-colors"
+              data-ocid="nav.link"
+            >
+              Features
+            </a>
+            <a
+              href="#timer"
+              className="hover:text-foreground transition-colors"
+              data-ocid="nav.link"
+            >
+              Timer
+            </a>
+          </nav>
+
+          <div className="flex items-center gap-3">
+            {notifPermission === "denied" && (
+              <div
+                className="hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium"
+                style={{
+                  background: "oklch(0.25 0.03 55)",
+                  color: "oklch(0.88 0.15 70)",
+                  border: "1px solid oklch(0.45 0.1 55 / 0.5)",
+                }}
+                data-ocid="nav.panel"
+              >
+                <BellOff className="w-3 h-3" />
+                Notifications blocked
+              </div>
+            )}
+            <button
+              type="button"
+              style={{ touchAction: "manipulation" }}
+              className="px-4 py-2 text-sm rounded-full border border-border text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors"
+              data-ocid="nav.secondary_button"
+            >
+              Login
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1">
+        <section
+          id="timer"
+          className={`px-4 ${isLandscape ? "py-4" : "py-12"}`}
+        >
+          <div className="max-w-md mx-auto space-y-4">
+            {/* Preset Quick-Start Buttons */}
+            {mode === "countdown" && !isRunning && !isPaused && (
+              <motion.div
+                initial={{ opacity: 0, y: -16 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.4 }}
+                className="flex gap-3"
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    startPreset(
+                      { workMs: 20000, restMs: 10000, totalSets: 8 },
+                      "tabata",
+                    )
+                  }
+                  style={{ minHeight: 88 }}
+                  className="flex-1 rounded-2xl font-bold text-sm flex flex-col items-center justify-center gap-0.5 transition-all hover:scale-[1.02] active:scale-[0.98] glass-btn-orange preset-pulse"
+                  data-ocid="preset.tabata"
+                >
+                  <span style={{ fontSize: 26 }}>⚡ TABATA</span>
+                  <span style={{ fontSize: 13, opacity: 0.85 }}>
+                    20s / 10s · 8 rounds
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    startPreset(
+                      { workMs: 40000, restMs: 20000, totalSets: 8 },
+                      "hiit",
+                    )
+                  }
+                  style={{ minHeight: 88 }}
+                  className="flex-1 rounded-2xl font-bold text-sm flex flex-col items-center justify-center gap-0.5 transition-all hover:scale-[1.02] active:scale-[0.98] glass-btn-cyan preset-pulse"
+                  data-ocid="preset.hiit"
+                >
+                  <span style={{ fontSize: 26 }}>🔥 HIIT</span>
+                  <span style={{ fontSize: 13, opacity: 0.85 }}>
+                    40s / 20s · 8 rounds
+                  </span>
+                </button>
+              </motion.div>
+            )}
+
+            <motion.div
+              initial={{ opacity: 0, y: 32 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, ease: "easeOut" }}
+            >
+              {/* Timer Card */}
+              <div
+                className={`relative rounded-3xl border p-6 md:p-8 shadow-card transition-colors duration-200 ${
+                  isAlarming ? "alarm-flash border-neon-red" : "neon-border"
+                } ${cardFlash ? "card-countdown-flash" : ""}`}
+                style={{
+                  background: isAlarming ? undefined : "oklch(0.16 0.008 235)",
+                }}
+                data-ocid="timer.card"
+              >
+                {/* Workout status bar */}
+                <AnimatePresence>
+                  {workoutState && workoutState.phase !== "complete" && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="mb-5 overflow-hidden"
+                    >
+                      <div
+                        className="flex items-center justify-between px-4 py-2.5 rounded-xl text-sm font-semibold"
+                        style={{
+                          background: isRestPhase
+                            ? "oklch(0.25 0.06 55 / 0.6)"
+                            : "oklch(0.2 0.06 150 / 0.6)",
+                          border: `1px solid ${
+                            isRestPhase
+                              ? "oklch(0.78 0.2 55 / 0.5)"
+                              : "oklch(0.93 0.3 155 / 0.4)"
+                          }`,
+                        }}
+                      >
+                        <span
+                          style={{
+                            color: isRestPhase
+                              ? "oklch(0.78 0.2 55)"
+                              : "oklch(0.93 0.3 155)",
+                          }}
+                        >
+                          Set {workoutState.currentSet} of{" "}
+                          {workoutConfigRef.current.totalSets}
+                        </span>
+                        <span
+                          className="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest"
+                          style={{
+                            background: isRestPhase
+                              ? "oklch(0.78 0.2 55 / 0.2)"
+                              : "oklch(0.93 0.3 155 / 0.2)",
+                            color: isRestPhase
+                              ? "oklch(0.88 0.2 55)"
+                              : "oklch(0.93 0.3 155)",
+                            boxShadow: isRestPhase
+                              ? "0 0 8px oklch(0.78 0.2 55 / 0.4)"
+                              : "0 0 8px oklch(0.93 0.3 155 / 0.4)",
+                          }}
+                        >
+                          {workoutState.phase === "rest" ? "REST" : "WORK"}
+                        </span>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Workout complete banner */}
+                <AnimatePresence>
+                  {workoutState?.phase === "complete" && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      className="mb-5 flex items-center gap-3 px-4 py-3 rounded-xl"
+                      style={{
+                        background: "oklch(0.2 0.06 150 / 0.5)",
+                        border: "1px solid oklch(0.93 0.3 155 / 0.5)",
+                      }}
+                      data-ocid="workout.success_state"
+                    >
+                      <CheckCircle2
+                        className="w-5 h-5 shrink-0"
+                        style={{ color: "oklch(0.93 0.3 155)" }}
+                      />
+                      <span
+                        className="text-sm font-bold"
+                        style={{ color: "oklch(0.93 0.3 155)" }}
+                      >
+                        Workout Complete! 💪
+                      </span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* ── Pill Mode Toggle ── */}
+                <div
+                  className="relative flex items-center p-1.5 rounded-full mb-7"
+                  style={{ background: "oklch(0.12 0.005 235)" }}
+                >
+                  <motion.div
+                    className="absolute top-1.5 bottom-1.5 rounded-full"
+                    animate={{
+                      left: mode === "countdown" ? "6px" : "calc(50%)",
+                      width: "calc(50% - 6px)",
+                    }}
+                    transition={{ type: "spring", stiffness: 420, damping: 32 }}
+                    style={{
+                      background: "oklch(0.93 0.3 155)",
+                      boxShadow:
+                        "0 0 16px oklch(0.93 0.3 155 / 0.65), 0 2px 8px oklch(0.93 0.3 155 / 0.4)",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange("countdown")}
+                    style={{ minHeight: "48px", touchAction: "manipulation" }}
+                    className={`relative z-10 flex-1 py-3 text-xs font-bold uppercase tracking-widest rounded-full transition-colors duration-200 ${
+                      mode === "countdown"
+                        ? "text-[oklch(0.1_0.006_240)]"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    data-ocid="timer.countdown.tab"
+                  >
+                    Countdown
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleModeChange("stopwatch")}
+                    style={{ minHeight: "48px", touchAction: "manipulation" }}
+                    className={`relative z-10 flex-1 py-3 text-xs font-bold uppercase tracking-widest rounded-full transition-colors duration-200 ${
+                      mode === "stopwatch"
+                        ? "text-[oklch(0.1_0.006_240)]"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    data-ocid="timer.stopwatch.tab"
+                  >
+                    Stopwatch
+                  </button>
+                </div>
+
+                {/* Circular Progress Ring + Time */}
+                <div className="flex justify-center mb-8">
+                  <div className="relative">
+                    <div
+                      className={[
+                        isPreAlert && !isAlarming ? "pre-alert-pulse" : "",
+                        ringPulse ? "ring-countdown-pulse" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                    >
+                      <CircularProgress
+                        progress={progress}
+                        isAlarming={isAlarming}
+                        isPreAlert={isPreAlert && !isAlarming && !isRestPhase}
+                        isRestPhase={isRestPhase}
+                        isPulsing={ringPulse}
+                        size={isLandscape ? 180 : 260}
+                        strokeWidth={11}
+                      />
+                    </div>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      {workoutState && (
+                        <div className="absolute top-6 left-0 right-0 flex justify-center">
+                          <span
+                            className="font-bold tracking-widest uppercase text-center"
+                            style={{
+                              fontSize: activePreset === "tabata" ? 22 : 14,
+                              color:
+                                workoutState.phase === "work"
+                                  ? "oklch(0.93 0.3 155)"
+                                  : "oklch(0.78 0.2 55)",
+                              textShadow:
+                                workoutState.phase === "work"
+                                  ? "0 0 20px oklch(0.93 0.3 155 / 0.8)"
+                                  : "0 0 20px oklch(0.78 0.2 55 / 0.8)",
+                              letterSpacing: "0.15em",
+                            }}
+                          >
+                            ROUND {workoutState.currentSet}/
+                            {workoutConfig.totalSets}
+                          </span>
+                        </div>
+                      )}
+                      <AnimatePresence mode="wait">
+                        {mode === "countdown" && isIdle && !workoutState ? (
+                          <motion.div
+                            key="inputs"
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            transition={{ duration: 0.2 }}
+                            className="flex items-end gap-1 text-center"
+                          >
+                            <TimeInput
+                              value={cdHours}
+                              onChange={setCdHours}
+                              max={23}
+                              label="H"
+                            />
+                            <span className="text-3xl font-bold font-mono-display text-muted-foreground mb-4">
+                              :
+                            </span>
+                            <TimeInput
+                              value={cdMinutes}
+                              onChange={setCdMinutes}
+                              max={59}
+                              label="M"
+                            />
+                            <span className="text-3xl font-bold font-mono-display text-muted-foreground mb-4">
+                              :
+                            </span>
+                            <TimeInput
+                              value={cdSeconds}
+                              onChange={setCdSeconds}
+                              max={59}
+                              label="S"
+                            />
+                          </motion.div>
+                        ) : (
+                          <motion.div
+                            key="display"
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            transition={{ duration: 0.2 }}
+                            className="text-center px-2"
+                          >
+                            <div
+                              className={`font-mono-display tabular-nums ${
+                                mode === "stopwatch"
+                                  ? "text-3xl md:text-4xl font-bold leading-none"
+                                  : "timer-display-xl"
+                              } ${
+                                isAlarming
+                                  ? "text-neon-red"
+                                  : isPreAlert
+                                    ? "pre-alert-text"
+                                    : isRestPhase
+                                      ? ""
+                                      : "time-display-glow"
+                              }`}
+                              style={
+                                isRestPhase && !isAlarming && !isPreAlert
+                                  ? {
+                                      color: "oklch(0.78 0.2 55)",
+                                      textShadow:
+                                        "0 0 20px oklch(0.78 0.2 55 / 0.6), 0 0 40px oklch(0.78 0.2 55 / 0.3)",
+                                    }
+                                  : undefined
+                              }
+                              data-ocid="timer.display"
+                            >
+                              {displayTime}
+                            </div>
+                            <div className="text-xs text-muted-foreground uppercase tracking-widest mt-2">
+                              {mode === "countdown"
+                                ? isAlarming
+                                  ? "Time's Up!"
+                                  : isPreAlert
+                                    ? "Get Ready!"
+                                    : isPaused
+                                      ? "Paused"
+                                      : isRestPhase
+                                        ? "Rest"
+                                        : "Remaining"
+                                : "Elapsed"}
+                            </div>
+                            {workoutState && (
+                              <div className="mt-2">
+                                <span
+                                  className="text-xs font-bold uppercase tracking-[0.3em] px-3 py-1 rounded-full"
+                                  style={{
+                                    background:
+                                      workoutState.phase === "work"
+                                        ? "oklch(0.93 0.3 155 / 0.15)"
+                                        : "oklch(0.78 0.2 55 / 0.15)",
+                                    color:
+                                      workoutState.phase === "work"
+                                        ? "oklch(0.93 0.3 155)"
+                                        : "oklch(0.78 0.2 55)",
+                                    border: `1px solid ${workoutState.phase === "work" ? "oklch(0.93 0.3 155 / 0.3)" : "oklch(0.78 0.2 55 / 0.3)"}`,
+                                  }}
+                                >
+                                  {workoutState.phase === "work"
+                                    ? "WORK"
+                                    : workoutState.phase === "rest"
+                                      ? "REST"
+                                      : "DONE"}
+                                </span>
+                              </div>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Controls */}
+                <div className="flex gap-3 justify-center mb-5">
+                  {isAlarming ? (
+                    <button
+                      type="button"
+                      onClick={handleDismissAlarm}
+                      style={{
+                        minHeight: "60px",
+                        minWidth: "120px",
+                        touchAction: "manipulation",
+                      }}
+                      className="flex-1 px-6 rounded-full neon-btn font-bold text-base flex items-center justify-center gap-2 transition-all"
+                      data-ocid="timer.confirm_button"
+                    >
+                      <AlarmClock className="w-5 h-5" />
+                      Dismiss
+                    </button>
+                  ) : (
+                    <>
+                      {isRunning ? (
+                        <button
+                          type="button"
+                          onClick={handlePause}
+                          style={{
+                            minHeight: "60px",
+                            minWidth: "120px",
+                            touchAction: "manipulation",
+                          }}
+                          className="flex-1 px-6 rounded-full neon-btn font-bold text-base flex items-center justify-center gap-2 transition-all"
+                          data-ocid="timer.primary_button"
+                        >
+                          <Pause className="w-5 h-5" /> Pause
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleStart}
+                          disabled={
+                            mode === "countdown" &&
+                            isIdle &&
+                            cdHours + cdMinutes + cdSeconds === 0 &&
+                            !workoutState
+                          }
+                          style={{
+                            minHeight: "60px",
+                            minWidth: "120px",
+                            touchAction: "manipulation",
+                          }}
+                          className="flex-1 px-6 rounded-full neon-btn font-bold text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                          data-ocid="timer.primary_button"
+                        >
+                          <Play className="w-5 h-5" />{" "}
+                          {isPaused ? "Resume" : "Start"}
+                        </button>
+                      )}
+
+                      {mode === "stopwatch" && isRunning ? (
+                        <button
+                          type="button"
+                          onClick={handleLap}
+                          style={{
+                            minHeight: "60px",
+                            minWidth: "120px",
+                            touchAction: "manipulation",
+                          }}
+                          className="flex-1 px-6 rounded-full glass-btn-secondary font-bold text-base flex items-center justify-center gap-2 transition-all"
+                          data-ocid="timer.secondary_button"
+                        >
+                          <Flag className="w-5 h-5" /> Lap
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleReset}
+                          disabled={
+                            isIdle && mode === "countdown" && !workoutState
+                          }
+                          style={{
+                            minHeight: "60px",
+                            minWidth: "120px",
+                            touchAction: "manipulation",
+                          }}
+                          className="flex-1 px-6 rounded-full glass-btn-secondary font-bold text-base flex items-center justify-center gap-2 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                          data-ocid="timer.secondary_button"
+                        >
+                          <RotateCcw className="w-5 h-5" /> Reset
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Quick presets */}
+                <AnimatePresence>
+                  {mode === "countdown" &&
+                    !isRunning &&
+                    !isAlarming &&
+                    !workoutState && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="flex gap-4 justify-center text-sm overflow-hidden"
+                      >
+                        {[
+                          { label: "5 min", sec: 300 },
+                          { label: "15 min", sec: 900 },
+                          { label: "30 min", sec: 1800 },
+                          { label: "1 hr", sec: 3600 },
+                        ].map(({ label, sec }) => (
+                          <button
+                            type="button"
+                            key={label}
+                            onClick={() => handlePreset(sec)}
+                            style={{
+                              minHeight: "44px",
+                              touchAction: "manipulation",
+                            }}
+                            className="neon-text hover:underline font-semibold transition-all px-2"
+                            data-ocid="timer.button"
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </motion.div>
+                    )}
+                </AnimatePresence>
+
+                {/* Laps */}
+                <AnimatePresence>
+                  {mode === "stopwatch" && laps.length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="mt-6 overflow-hidden"
+                    >
+                      <div className="border-t border-border pt-4">
+                        <p className="text-xs uppercase tracking-widest text-muted-foreground mb-3">
+                          Laps
+                        </p>
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                          {laps.map((lap, i) => (
+                            <div
+                              key={lap.index}
+                              className="flex justify-between items-center text-sm py-1 border-b border-border/40"
+                              data-ocid={`lap.item.${i + 1}`}
+                            >
+                              <span className="text-muted-foreground">
+                                Lap {lap.index}
+                              </span>
+                              <span className="font-mono-display text-foreground">
+                                {formatStopwatch(lap.split)}
+                              </span>
+                              <span className="font-mono-display text-muted-foreground text-xs">
+                                {formatStopwatch(lap.time)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Notification denied inline notice (mobile) */}
+                {notifPermission === "denied" && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    className="mt-4 flex items-center gap-2 px-3 py-2 rounded-xl text-xs overflow-hidden md:hidden"
+                    style={{
+                      background: "oklch(0.22 0.025 55)",
+                      color: "oklch(0.82 0.12 70)",
+                      border: "1px solid oklch(0.4 0.08 55 / 0.5)",
+                    }}
+                    data-ocid="timer.panel"
+                  >
+                    <BellOff className="w-3 h-3 shrink-0" />
+                    <span>
+                      Notifications blocked. Enable in browser settings to
+                      receive alerts in background tabs.
+                    </span>
+                  </motion.div>
+                )}
+              </div>
+            </motion.div>
+
+            {/* ===== WORKOUT MODE PANEL (Countdown only) ===== */}
+            <AnimatePresence>
+              {mode === "countdown" && (
+                <motion.div
+                  initial={{ opacity: 0, y: 16 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 16 }}
+                  transition={{ duration: 0.4, delay: 0.1 }}
+                >
+                  {/* Workout Mode Toggle Header */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWorkoutModeEnabled((v) => !v);
+                      if (workoutModeEnabled) {
+                        // Turning off — reset workout
+                        setWorkoutState(null);
+                        workoutStateRef.current = null;
+                        onZeroRef.current = null;
+                      }
+                    }}
+                    style={{
+                      touchAction: "manipulation",
+                      background: "oklch(0.14 0.007 235)",
+                    }}
+                    className="w-full flex items-center justify-between px-5 py-4 rounded-2xl border border-border hover:border-muted-foreground transition-all group"
+                    data-ocid="workout.toggle"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-9 h-9 rounded-xl flex items-center justify-center"
+                        style={{
+                          background: workoutModeEnabled
+                            ? "oklch(0.93 0.3 155 / 0.15)"
+                            : "oklch(0.22 0.007 230)",
+                          border: `1px solid ${
+                            workoutModeEnabled
+                              ? "oklch(0.93 0.3 155 / 0.4)"
+                              : "oklch(0.3 0.008 230)"
+                          }`,
+                        }}
+                      >
+                        <Dumbbell
+                          className="w-4 h-4"
+                          style={{
+                            color: workoutModeEnabled
+                              ? "oklch(0.93 0.3 155)"
+                              : "oklch(0.6 0.012 230)",
+                          }}
+                        />
+                      </div>
+                      <div className="text-left">
+                        <div className="text-sm font-semibold text-foreground">
+                          Workout Mode
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          Auto-cycle work &amp; rest sets
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      className="w-11 h-6 rounded-full relative transition-all duration-200"
+                      style={{
+                        background: workoutModeEnabled
+                          ? "oklch(0.93 0.3 155)"
+                          : "oklch(0.28 0.008 230)",
+                        boxShadow: workoutModeEnabled
+                          ? "0 0 12px oklch(0.93 0.3 155 / 0.5)"
+                          : "none",
+                      }}
+                    >
+                      <div
+                        className="absolute top-0.5 w-5 h-5 rounded-full transition-all duration-200"
+                        style={{
+                          left: workoutModeEnabled
+                            ? "calc(100% - 22px)"
+                            : "2px",
+                          background: "white",
+                        }}
+                      />
+                    </div>
+                  </button>
+
+                  {/* Workout Config Panel */}
+                  <AnimatePresence>
+                    {workoutModeEnabled && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.3 }}
+                        className="overflow-hidden"
+                      >
+                        <div
+                          className="rounded-2xl border border-border p-5 mt-2 space-y-4"
+                          style={{ background: "oklch(0.14 0.007 235)" }}
+                          data-ocid="workout.panel"
+                        >
+                          {/* Config fields */}
+                          <div className="grid grid-cols-3 gap-3">
+                            {/* Work Time */}
+                            <div className="col-span-1">
+                              <label
+                                htmlFor="wrk-work-min"
+                                className="text-xs text-muted-foreground uppercase tracking-wider block mb-2"
+                              >
+                                Work
+                              </label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={99}
+                                  value={wrkWorkMin}
+                                  onChange={(e) =>
+                                    setWrkWorkMin(
+                                      Math.max(
+                                        0,
+                                        Math.min(
+                                          99,
+                                          Number(e.target.value) || 0,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  className="w-full text-center text-lg font-bold font-mono-display bg-transparent text-foreground border-b-2 border-border focus:border-neon-green outline-none transition-colors pb-0.5"
+                                  style={{ appearance: "textfield" }}
+                                  placeholder="05"
+                                  data-ocid="workout.input"
+                                />
+                                <span className="text-muted-foreground text-sm font-bold">
+                                  m
+                                </span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={59}
+                                  value={wrkWorkSec}
+                                  onChange={(e) =>
+                                    setWrkWorkSec(
+                                      Math.max(
+                                        0,
+                                        Math.min(
+                                          59,
+                                          Number(e.target.value) || 0,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  className="w-full text-center text-lg font-bold font-mono-display bg-transparent text-foreground border-b-2 border-border focus:border-neon-green outline-none transition-colors pb-0.5"
+                                  style={{ appearance: "textfield" }}
+                                  placeholder="00"
+                                  data-ocid="workout.input"
+                                />
+                                <span className="text-muted-foreground text-sm font-bold">
+                                  s
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Rest Time */}
+                            <div className="col-span-1">
+                              <label
+                                htmlFor="wrk-rest-min"
+                                className="text-xs text-muted-foreground uppercase tracking-wider block mb-2"
+                              >
+                                Rest
+                              </label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={99}
+                                  value={wrkRestMin}
+                                  onChange={(e) =>
+                                    setWrkRestMin(
+                                      Math.max(
+                                        0,
+                                        Math.min(
+                                          99,
+                                          Number(e.target.value) || 0,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  className="w-full text-center text-lg font-bold font-mono-display bg-transparent text-foreground border-b-2 border-border focus:border-neon-green outline-none transition-colors pb-0.5"
+                                  style={{ appearance: "textfield" }}
+                                  placeholder="01"
+                                  data-ocid="workout.input"
+                                />
+                                <span className="text-muted-foreground text-sm font-bold">
+                                  m
+                                </span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={59}
+                                  value={wrkRestSec}
+                                  onChange={(e) =>
+                                    setWrkRestSec(
+                                      Math.max(
+                                        0,
+                                        Math.min(
+                                          59,
+                                          Number(e.target.value) || 0,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  className="w-full text-center text-lg font-bold font-mono-display bg-transparent text-foreground border-b-2 border-border focus:border-neon-green outline-none transition-colors pb-0.5"
+                                  style={{ appearance: "textfield" }}
+                                  placeholder="00"
+                                  data-ocid="workout.input"
+                                />
+                                <span className="text-muted-foreground text-sm font-bold">
+                                  s
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Sets */}
+                            <div className="col-span-1">
+                              <label
+                                htmlFor="wrk-sets"
+                                className="text-xs text-muted-foreground uppercase tracking-wider block mb-2"
+                              >
+                                Sets
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={99}
+                                id="wrk-sets"
+                                value={wrkSets}
+                                onChange={(e) =>
+                                  setWrkSets(
+                                    Math.max(
+                                      1,
+                                      Math.min(99, Number(e.target.value) || 1),
+                                    ),
+                                  )
+                                }
+                                className="w-full text-center text-lg font-bold font-mono-display bg-transparent text-foreground border-b-2 border-border focus:border-neon-green outline-none transition-colors pb-0.5"
+                                style={{ appearance: "textfield" }}
+                                data-ocid="workout.input"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Start Workout Button */}
+                          <button
+                            type="button"
+                            onClick={handleStartWorkout}
+                            disabled={
+                              wrkWorkMin + wrkWorkSec === 0 || wrkSets <= 0
+                            }
+                            style={{
+                              minHeight: "60px",
+                              touchAction: "manipulation",
+                            }}
+                            className="w-full rounded-full neon-btn font-bold text-base flex items-center justify-center gap-2.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                            data-ocid="workout.primary_button"
+                          >
+                            <Zap className="w-5 h-5" />
+                            Start Workout
+                          </button>
+
+                          {/* Custom Routines Section */}
+                          <div className="border-t border-border pt-4 space-y-3">
+                            <p className="text-xs uppercase tracking-widest text-muted-foreground">
+                              Your Routines
+                            </p>
+                            {customRoutines.length === 0 && !showAddCustom && (
+                              <p className="text-xs text-muted-foreground/60 italic">
+                                No saved routines yet.
+                              </p>
+                            )}
+                            {customRoutines.map((r, idx) => (
+                              <div
+                                key={r.id}
+                                className="flex items-center gap-2"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    startPreset(
+                                      {
+                                        workMs: r.workMs,
+                                        restMs: r.restMs,
+                                        totalSets: r.sets,
+                                      },
+                                      "custom",
+                                    )
+                                  }
+                                  className="flex-1 text-left px-3 py-2 rounded-xl text-sm font-semibold transition-all hover:opacity-90"
+                                  style={{
+                                    background: `${r.color}22`,
+                                    border: `1px solid ${r.color}66`,
+                                    color: r.color,
+                                  }}
+                                  data-ocid={`routine.start.${idx + 1}`}
+                                >
+                                  {r.name}
+                                  <span className="ml-2 text-xs font-normal opacity-70">
+                                    {r.workMs / 1000}s/{r.restMs / 1000}s ·{" "}
+                                    {r.sets} sets
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = customRoutines.filter(
+                                      (x) => x.id !== r.id,
+                                    );
+                                    setCustomRoutines(updated);
+                                    saveCustomRoutines(updated);
+                                  }}
+                                  className="text-muted-foreground hover:text-destructive transition-colors p-1 text-base"
+                                  data-ocid={`routine.delete.${idx + 1}`}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ))}
+                            {!showAddCustom && (
+                              <button
+                                type="button"
+                                onClick={() => setShowAddCustom(true)}
+                                className="w-full rounded-xl border border-dashed border-border text-muted-foreground text-xs py-2 hover:border-neon-green hover:text-neon-green transition-colors"
+                                data-ocid="routine.open_modal_button"
+                              >
+                                + Add Custom Routine
+                              </button>
+                            )}
+                            {showAddCustom && (
+                              <motion.div
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: "auto" }}
+                                exit={{ opacity: 0, height: 0 }}
+                                className="overflow-hidden space-y-3 rounded-xl border border-border p-3"
+                                style={{ background: "oklch(0.12 0.006 235)" }}
+                              >
+                                <input
+                                  type="text"
+                                  placeholder="Routine name"
+                                  value={newRoutineName}
+                                  onChange={(e) =>
+                                    setNewRoutineName(e.target.value)
+                                  }
+                                  className="w-full text-sm font-semibold bg-transparent border-b border-border text-foreground outline-none pb-1 focus:border-neon-green transition-colors"
+                                  data-ocid="routine.input"
+                                />
+                                <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                                  <div>
+                                    <span className="block mb-1 uppercase tracking-wider">
+                                      Work (s)
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={300}
+                                      value={newRoutineWork}
+                                      onChange={(e) =>
+                                        setNewRoutineWork(
+                                          Math.max(
+                                            1,
+                                            Math.min(
+                                              300,
+                                              Number(e.target.value) || 1,
+                                            ),
+                                          ),
+                                        )
+                                      }
+                                      className="w-full text-center font-bold bg-transparent border-b border-border text-foreground outline-none pb-0.5 focus:border-neon-green transition-colors"
+                                      data-ocid="routine.input"
+                                    />
+                                  </div>
+                                  <div>
+                                    <span className="block mb-1 uppercase tracking-wider">
+                                      Rest (s)
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={300}
+                                      value={newRoutineRest}
+                                      onChange={(e) =>
+                                        setNewRoutineRest(
+                                          Math.max(
+                                            0,
+                                            Math.min(
+                                              300,
+                                              Number(e.target.value) || 0,
+                                            ),
+                                          ),
+                                        )
+                                      }
+                                      className="w-full text-center font-bold bg-transparent border-b border-border text-foreground outline-none pb-0.5 focus:border-neon-green transition-colors"
+                                      data-ocid="routine.input"
+                                    />
+                                  </div>
+                                  <div>
+                                    <span className="block mb-1 uppercase tracking-wider">
+                                      Sets
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={50}
+                                      value={newRoutineSets}
+                                      onChange={(e) =>
+                                        setNewRoutineSets(
+                                          Math.max(
+                                            1,
+                                            Math.min(
+                                              50,
+                                              Number(e.target.value) || 1,
+                                            ),
+                                          ),
+                                        )
+                                      }
+                                      className="w-full text-center font-bold bg-transparent border-b border-border text-foreground outline-none pb-0.5 focus:border-neon-green transition-colors"
+                                      data-ocid="routine.input"
+                                    />
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs text-muted-foreground uppercase tracking-wider">
+                                    Color
+                                  </span>
+                                  <input
+                                    type="color"
+                                    value={newRoutineColor}
+                                    onChange={(e) =>
+                                      setNewRoutineColor(e.target.value)
+                                    }
+                                    className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent"
+                                  />
+                                  <div className="flex gap-2 ml-auto">
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowAddCustom(false)}
+                                      className="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1"
+                                      data-ocid="routine.cancel_button"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={handleSaveCustom}
+                                      className="text-xs font-bold px-3 py-1 rounded-lg neon-btn"
+                                      data-ocid="routine.save_button"
+                                    >
+                                      Save
+                                    </button>
+                                  </div>
+                                </div>
+                              </motion.div>
+                            )}
+                          </div>
+
+                          {/* Workout Log */}
+                          <AnimatePresence>
+                            {workoutState && workoutState.log.length > 0 && (
+                              <motion.div
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: "auto" }}
+                                exit={{ opacity: 0, height: 0 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="border-t border-border pt-4">
+                                  <p className="text-xs uppercase tracking-widest text-muted-foreground mb-3">
+                                    Workout Summary
+                                  </p>
+                                  <WorkoutSummaryChart log={workoutState.log} />
+                                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                                    {workoutState.log.map((entry, i) => (
+                                      <div
+                                        key={`${entry.set}-${i}`}
+                                        className="flex items-center justify-between text-sm py-1.5 border-b border-border/30"
+                                        data-ocid={`workout.item.${i + 1}`}
+                                      >
+                                        <span className="text-muted-foreground font-medium">
+                                          Set {entry.set}
+                                        </span>
+                                        <div className="flex items-center gap-3 text-xs">
+                                          <span
+                                            className="font-mono-display"
+                                            style={{
+                                              color: "oklch(0.93 0.3 155)",
+                                            }}
+                                          >
+                                            {formatMmSs(entry.workMs)} work
+                                          </span>
+                                          {entry.restMs !== null && (
+                                            <span
+                                              className="font-mono-display"
+                                              style={{
+                                                color: "oklch(0.78 0.2 55)",
+                                              }}
+                                            >
+                                              {formatMmSs(entry.restMs)} rest
+                                            </span>
+                                          )}
+                                          <CheckCircle2
+                                            className="w-4 h-4"
+                                            style={{
+                                              color: "oklch(0.93 0.3 155)",
+                                            }}
+                                          />
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </section>
+
+        {/* Features section */}
+        <section id="features" className="py-16 px-4">
+          <div className="max-w-4xl mx-auto">
+            <motion.div
+              initial={{ opacity: 0, y: 24 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5 }}
+              className="text-center mb-12"
+            >
+              <h2 className="text-3xl font-bold text-foreground mb-3">
+                Key Features
+              </h2>
+              <p className="text-muted-foreground">
+                Everything you need for precision time management
+              </p>
+            </motion.div>
+
+            <div className="grid md:grid-cols-3 gap-6">
+              {[
+                {
+                  icon: <Timer className="w-6 h-6" />,
+                  title: "Precision Timing",
+                  desc: "Countdown and stopwatch with centisecond accuracy. Set hours, minutes, and seconds with ease.",
+                },
+                {
+                  icon: <Layers className="w-6 h-6" />,
+                  title: "Lap Tracking",
+                  desc: "Record unlimited lap splits during your stopwatch session. Review your performance in detail.",
+                },
+                {
+                  icon: <Bell className="w-6 h-6" />,
+                  title: "Smart Alerts",
+                  desc: "Tick countdown at 5s, loud 3-2-1 beep, vibration, alarm, browser notifications — even when the tab is hidden.",
+                },
+              ].map(({ icon, title, desc }, i) => (
+                <motion.div
+                  key={title}
+                  initial={{ opacity: 0, y: 24 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.5, delay: i * 0.12 }}
+                  className="rounded-2xl border border-border p-6 hover:border-neon-green/40 transition-all group"
+                  style={{ background: "oklch(0.16 0.007 235)" }}
+                  data-ocid="features.card"
+                >
+                  <div
+                    className="w-12 h-12 rounded-xl border border-neon-green/40 flex items-center justify-center mb-4 text-neon-green group-hover:border-neon-green transition-all"
+                    style={{ boxShadow: "0 0 12px oklch(0.93 0.3 155 / 0.25)" }}
+                  >
+                    {icon}
+                  </div>
+                  <h3 className="font-semibold text-foreground mb-2">
+                    {title}
+                  </h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {desc}
+                  </p>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-border/40 py-8 px-4">
+        <div className="max-w-4xl mx-auto">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mb-8">
+            {[
+              {
+                title: "Product",
+                links: ["Features", "Changelog", "Roadmap", "Pricing"],
+              },
+              {
+                title: "Company",
+                links: ["About", "Blog", "Careers", "Press"],
+              },
+              {
+                title: "Support",
+                links: ["Documentation", "Help Center", "Community", "Contact"],
+              },
+              {
+                title: "Legal",
+                links: ["Privacy", "Terms", "Cookies", "License"],
+              },
+            ].map(({ title, links }) => (
+              <div key={title}>
+                <h4 className="text-sm font-semibold text-foreground mb-3">
+                  {title}
+                </h4>
+                <ul className="space-y-2">
+                  {links.map((link) => (
+                    <li key={link}>
+                      <span className="text-sm text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+                        {link}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+          <div className="border-t border-border/40 pt-6 flex flex-col md:flex-row items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-neon-green" />
+              <span className="text-sm font-semibold text-foreground">
+                ChronoFlow
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              &copy; {new Date().getFullYear()}. Built with ❤️ using{" "}
+              <a
+                href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(window.location.hostname)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-neon-green hover:underline"
+              >
+                caffeine.ai
+              </a>
+            </p>
+          </div>
+        </div>
+      </footer>
+      {/* Save Routine Prompt */}
+      {showSaveRoutinePrompt && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4"
+          style={{
+            background: "oklch(0 0 0 / 0.7)",
+            backdropFilter: "blur(4px)",
+          }}
+          data-ocid="save_routine.modal"
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl p-6 space-y-4"
+            style={{
+              background: "oklch(0.15 0.007 235)",
+              border: "1px solid oklch(0.65 0.28 300 / 0.4)",
+              boxShadow: "0 0 40px oklch(0.65 0.28 300 / 0.2)",
+            }}
+          >
+            <h3 className="font-bold text-lg text-foreground">
+              Save this Routine?
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              Give it a name to quickly start it next time.
+            </p>
+            <input
+              type="text"
+              value={saveRoutineName}
+              onChange={(e) => setSaveRoutineName(e.target.value)}
+              placeholder="e.g. Leg Day Special"
+              className="w-full px-4 py-3 rounded-xl text-sm bg-transparent text-foreground outline-none"
+              style={{ border: "1px solid oklch(0.65 0.28 300 / 0.4)" }}
+              data-ocid="save_routine.input"
+            />
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setShowSaveRoutinePrompt(false)}
+                className="flex-1 py-3 rounded-xl text-sm font-semibold glass-btn-secondary"
+                data-ocid="save_routine.cancel_button"
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const r: CustomRoutine = {
+                    id: Date.now().toString(),
+                    name: saveRoutineName || "My Routine",
+                    workMs: workoutConfig.workMs,
+                    restMs: workoutConfig.restMs,
+                    sets: workoutConfig.totalSets,
+                    color: activePreset === "tabata" ? "#FF8C00" : "#00E5FF",
+                  };
+                  const updated = [...customRoutines, r];
+                  setCustomRoutines(updated);
+                  saveCustomRoutines(updated);
+                  setShowSaveRoutinePrompt(false);
+                }}
+                className="flex-1 py-3 rounded-xl text-sm font-bold glass-btn-purple"
+                data-ocid="save_routine.confirm_button"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimeInput({
+  value,
+  onChange,
+  max,
+  label,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  max: number;
+  label: string;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <input
+        type="number"
+        min={0}
+        max={max}
+        value={String(value).padStart(2, "0")}
+        onChange={(e) => {
+          const v = Math.max(
+            0,
+            Math.min(max, Number.parseInt(e.target.value) || 0),
+          );
+          onChange(v);
+        }}
+        className="w-14 text-center text-3xl font-bold font-mono-display bg-transparent text-foreground border-b-2 border-border focus:border-neon-green outline-none transition-colors pb-1"
+        style={{ appearance: "textfield", touchAction: "manipulation" }}
+        data-ocid="timer.input"
+      />
+      <span className="text-xs text-muted-foreground uppercase tracking-wider">
+        {label}
+      </span>
+    </div>
+  );
+}
